@@ -36,7 +36,7 @@ jobs:
           repo sync --no-tags --no-clone-bundle -j$(nproc --all)
       - name: GCC Build
         run: |
-          sed -i s/build-user/1zeroseven4/g build/_setup_env.sh
+          sed -i s/build-user/cyberknight777/g build/_setup_env.sh
           sed -i s/ver=..*/ver=${{ env.VERSION }}/ kernel/msm-4.14/version
           build/build.sh
       - name: Push Kernel
