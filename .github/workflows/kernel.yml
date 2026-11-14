@@ -31,11 +31,50 @@ jobs:
     steps:
       - name: Environment Initialization
         run: |
-          sudo dnf install gcc clang lld repo bc flex openssl-devel openssl-devel-engine wget tar zstd bsdtar file rsync zip -y
+          sudo dnf install gcc clang lld repo bc flex openssl-devel wget tar zstd bsdtar file rsync zip -y
       - name: Repo Sync
         run: |
           repo init --depth=1 -u https://github.com/aosp-sunny/android_kernel_manifest.git -b master
           repo sync --no-tags --no-clone-bundle -j$(nproc --all)
+      - name: Patch kernel host tools
+        run: |
+          cat > /tmp/patch-openssl-engine.py << 'PYEOF'
+          import re, sys, pathlib
+
+          root = pathlib.Path(sys.argv[1])
+
+          def sub1(text, pattern, repl, name):
+              new, n = re.subn(pattern, repl, text, count=1, flags=re.S)
+              if n != 1:
+                  sys.exit(f"patch failed: could not find {name}")
+              return new
+
+          def common(t):
+              t = re.sub(r'^#include <openssl/engine\.h>\n', '', t, flags=re.M)
+              t = t.replace('ERR_get_error_line(&file, &line)',
+                            'ERR_get_error_all(&file, &line, NULL, NULL, NULL)')
+              t = re.sub(r'^\s*(OpenSSL_add_all_algorithms|ERR_load_crypto_strings|OpenSSL_add_all_digests)\(\);\n',
+                         '', t, flags=re.M)
+              return t
+
+          p = next(root.glob('scripts/extract-cert.c'), None) or next(root.glob('certs/extract-cert.c'))
+          t = common(p.read_text())
+          t = sub1(t, r'\} else if \(!strncmp\(cert_src, "pkcs11:", 7\)\) \{.*?\n\t\} else \{\n',
+                   '} else if (!strncmp(cert_src, "pkcs11:", 7)) {\n'
+                   '\t\tERR(1, "PKCS#11 certificates are not supported in this build");\n'
+                   '\t} else {\n', 'extract-cert pkcs11 block')
+          p.write_text(t)
+
+          p = root / 'scripts/sign-file.c'
+          if p.exists():
+              t = common(p.read_text())
+              t = sub1(t, r'\tif \(!strncmp\(private_key_name, "pkcs11:", 7\)\) \{.*?\n\t\} else \{\n\t\tBIO \*b;\n\n(.*?)\n\t\}\n\n\treturn private_key;',
+                       lambda m: '\tBIO *b;\n\n' + re.sub(r'^\t', '', m.group(1), flags=re.M) + '\n\n\treturn private_key;',
+                       'sign-file pkcs11 block')
+              p.write_text(t)
+          print("Patched OK")
+          PYEOF
+          python3 /tmp/patch-openssl-engine.py kernel/msm-4.14
       - name: GCC Build
         run: |
           sed -i s/build-user/cyberknight777/g build/_setup_env.sh
@@ -53,8 +92,12 @@ jobs:
             cd sunny-kernel
             f="$(git rev-parse --git-dir)/hooks/commit-msg"; curl -o "$f" https://review.statixos.com/tools/hooks/commit-msg ; chmod +x "$f"
             git add .
-            git commit -m "sunny-kernel: Update prebuilts $(/bin/date -u '+%d%m%Y%I%M')" -m "- Version: $(strings Image | grep 'Linux version 4')"
-            git push
+            if git diff --cached --quiet; then
+              echo "Prebuilts are identical to ${{ env.BRANCH }} HEAD - nothing to commit, skipping push."
+            else
+              git commit -m "sunny-kernel: Update prebuilts $(/bin/date -u '+%d%m%Y%I%M')" -m "- Version: $(strings Image | grep 'Linux version 4' | head -n 1)"
+              git push
+            fi
       - name: Notify Telegram
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ env.BOT_TOKEN }}/sendMessage \
